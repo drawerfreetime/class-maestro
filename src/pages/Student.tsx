@@ -20,6 +20,7 @@ export default function Student() {
   const [score, setScore] = useState<number>(0);
   const [expression, setExpression] = useState<number>(0);
   const [feedback, setFeedback] = useState<string>('대기 중');
+  const [cameraState, setCameraState] = useState<'idle' | 'requesting' | 'granted' | 'error'>('idle');
 
   useEffect(() => {
     if (!location.state?.studentName) {
@@ -42,40 +43,6 @@ export default function Student() {
       }
     });
 
-    // 2. 미디어파이프 및 웹캠 상시 기동 (권한 요청 포함)
-    async function initMediaPipeAndCamera() {
-      try {
-        const vision = await FilesetResolver.forVisionTasks(
-          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8/wasm'
-        );
-        landmarkerRef.current = await HandLandmarker.createFromOptions(vision, {
-          baseOptions: {
-            modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker_full/float16/1/hand_landmarker_full.task',
-            delegate: 'GPU'
-          },
-          runningMode: 'VIDEO',
-          numHands: 2
-        });
-
-        // 상시 웹캠 스트림 확보 (브라우저 팝업으로 카메라 권한 명확히 요청)
-        if (videoRef.current) {
-          const stream = await navigator.mediaDevices.getUserMedia({
-            video: { width: 640, height: 480 },
-            audio: false
-          });
-          videoRef.current.srcObject = stream;
-          videoRef.current.addEventListener('loadeddata', () => {
-            requestRef.current = requestAnimationFrame(renderLoop);
-          });
-        }
-      } catch (err) {
-        alert('카메라 권한을 허용해야 지휘 실시간 인식이 가능합니다!');
-        console.error(err);
-      }
-    }
-
-    initMediaPipeAndCamera();
-
     return () => {
       unsubscribeGame();
       if (requestRef.current) cancelAnimationFrame(requestRef.current);
@@ -83,7 +50,47 @@ export default function Student() {
         (videoRef.current.srcObject as MediaStream).getTracks().forEach(track => track.stop());
       }
     };
-  }, []);
+  }, [location.state?.studentName, navigate]);
+
+  // 2. 미디어파이프 및 웹캠 상시 기동 (버튼 클릭을 통한 명시적 요청)
+  const initMediaPipeAndCamera = async () => {
+    setCameraState('requesting');
+    try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error('브라우저가 카메라를 지원하지 않거나 안전하지 않은 연결(HTTP)입니다.');
+      }
+
+      const vision = await FilesetResolver.forVisionTasks(
+        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8/wasm'
+      );
+      landmarkerRef.current = await HandLandmarker.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+          delegate: 'GPU'
+        },
+        runningMode: 'VIDEO',
+        numHands: 2
+      });
+
+      // 상시 웹캠 스트림 확보 (브라우저 팝업으로 카메라 권한 명확히 요청)
+      if (videoRef.current) {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
+          audio: false
+        });
+        videoRef.current.srcObject = stream;
+        videoRef.current.onloadedmetadata = () => {
+          videoRef.current?.play();
+          requestRef.current = requestAnimationFrame(renderLoop);
+          setCameraState('granted');
+        };
+      }
+    } catch (err: any) {
+      alert(`카메라 권한을 허용해야 합니다.\n상세오류: ${err.message || err}`);
+      console.error(err);
+      setCameraState('error');
+    }
+  };
 
   // 무한대(∞) 모양의 4박자 지휘 궤적 수학 공식
   const getInfinityLoopNode = (time: number) => {
@@ -95,7 +102,7 @@ export default function Student() {
     const scaleX = 220;
     const scaleY = 120;
     const x = 400 + scaleX * Math.sin(angle);
-    const y = 300 + scaleY * Math.sin(2 * angle) / 2;
+    const y = 225 + scaleY * Math.sin(2 * angle) / 2;
 
     return { x, y };
   };
@@ -148,7 +155,7 @@ export default function Student() {
     ctx.setLineDash([]);
 
     // --- [조건부 평가 영역]: 교사가 합주 시작(isLive)을 했을 때만 활성화 ---
-    let targetNode = { x: 400, y: 300 }; // 비작동시 중앙 고정
+    let targetNode = { x: 400, y: 225 }; // 비작동시 중앙 고정
     if (isLive) {
       targetNode = getInfinityLoopNode(timestamp);
       ctx.fillStyle = '#1F2937'; // 타이밍 구슬 등장
@@ -161,7 +168,9 @@ export default function Student() {
     let currentExpression = 0;
 
     // 미디어파이프 관절 실시간 오버레이
-    const results = landmarkerRef.current.detectVideo(videoRef.current, timestamp);
+    try {
+      // @mediapipe/tasks-vision 의 비디오 처리 메서드는 detectForVideo 입니다.
+      const results = landmarkerRef.current.detectForVideo(videoRef.current, performance.now());
     if (results.landmarks && results.handedness) {
       results.landmarks.forEach((landmarks: any[]) => {
         // 화면 미러링 기준: 좌측 영역은 왼손(표현), 우측 영역은 오른손(박자)으로 실전 맵핑 처리
@@ -169,6 +178,14 @@ export default function Student() {
         const isRightZone = wristX > canvas.width / 2;
 
         if (isRightZone) {
+          // 오른손 마디마디 전체 점 찍기 (골드 컬러)
+          landmarks.forEach(lm => {
+            ctx.fillStyle = 'rgba(245, 158, 11, 0.8)';
+            ctx.beginPath();
+            ctx.arc((1 - lm.x) * canvas.width, lm.y * canvas.height, 5, 0, 2 * Math.PI);
+            ctx.fill();
+          });
+
           // 오른손 마디마디 기준 포인터 (골드 컬러 램프)
           const mcp = landmarks[9];
           const pointerX = (1 - (landmarks[0].x + mcp.x) / 2) * canvas.width;
@@ -212,6 +229,9 @@ export default function Student() {
         }
       });
     }
+    } catch (err) {
+      console.warn("MediaPipe detection error:", err);
+    }
 
     if (isLive && currentBeatScore > 0) {
       setScore(prev => Math.round(prev * 0.95 + currentBeatScore * 0.05));
@@ -247,13 +267,30 @@ export default function Student() {
       </div>
 
       {/* 메인 캔버스 스테이지 (웹캠 화면 상시 전면 배치) */}
-      <div className="relative w-[800px] h-[600px] bg-white rounded-2xl shadow-sm border border-[#D1D5DB] overflow-hidden">
-        <video ref={videoRef} className="hidden" width="640" height="480" playsInline muted />
-        <canvas ref={canvasRef} width="800" height="600" className="w-full h-full" />
+      <div className="relative w-[800px] h-[450px] bg-white rounded-2xl shadow-sm border border-[#D1D5DB] overflow-hidden">
+        <video ref={videoRef} style={{ position: 'absolute', opacity: 0, width: 0, height: 0 }} playsInline muted autoPlay />
+        <canvas ref={canvasRef} width="800" height="450" className="w-full h-full" />
         
+        {/* 카메라 권한 요청 오버레이 */}
+        {cameraState !== 'granted' && (
+          <div className="absolute inset-0 bg-black/60 flex flex-col justify-center items-center z-10 backdrop-blur-sm">
+            <div className="bg-white px-8 py-6 rounded-2xl shadow-xl text-center max-w-sm">
+              <h2 className="text-xl font-bold text-gray-800 mb-2">카메라 연결</h2>
+              <p className="text-sm text-gray-500 mb-6">지휘 동작 인식을 위해 카메라 권한이 필요합니다.</p>
+              <button
+                onClick={initMediaPipeAndCamera}
+                disabled={cameraState === 'requesting'}
+                className="w-full py-3 bg-[#F59E0B] hover:bg-[#D97706] text-white font-bold rounded-xl transition duration-200 disabled:opacity-50"
+              >
+                {cameraState === 'requesting' ? '카메라 연결 중...' : '권한 허용 및 카메라 켜기'}
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* 대기 중 안내 오버레이 */}
-        {!isLive && (
-          <div className="absolute inset-0 bg-black/40 flex justify-center items-center backdrop-blur-xs">
+        {cameraState === 'granted' && !isLive && (
+          <div className="absolute inset-0 bg-black/40 flex justify-center items-center backdrop-blur-xs z-0">
             <div className="bg-white px-6 py-4 rounded-xl shadow-lg text-center border border-gray-200">
               <p className="text-base font-bold text-gray-800">지휘 준비 완료 🤍</p>
               <p className="text-xs text-gray-500 mt-1">선생님이 합주를 시작하면 음악과 평가가 시작됩니다.</p>
