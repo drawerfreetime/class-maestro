@@ -7,13 +7,14 @@ import { db } from '../firebase';
 export default function Student() {
   const location = useLocation();
   const navigate = useNavigate();
-  const { studentName, partId } = location.state || { studentName: '익명', partId: 'V1' };
+  const { studentName } = location.state || { studentName: '익명' };
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const landmarkerRef = useRef<any>(null);
   const requestRef = useRef<number | null>(null);
   const lastFirebaseUpdate = useRef<number>(0);
+  const beatTypeRef = useRef<string>('4/4');
 
   // [수업 제어 상태]
   const [isLive, setIsLive] = useState<boolean>(false); // 교사의 합주 시작 여부
@@ -21,6 +22,7 @@ export default function Student() {
   const [expression, setExpression] = useState<number>(0);
   const [feedback, setFeedback] = useState<string>('대기 중');
   const [cameraState, setCameraState] = useState<'idle' | 'requesting' | 'granted' | 'error'>('idle');
+  const [beatType, setBeatType] = useState<string>('4/4');
 
   useEffect(() => {
     if (!location.state?.studentName) {
@@ -32,14 +34,21 @@ export default function Student() {
     const gameStateRef = ref(db, 'gameState');
     const unsubscribeGame = onValue(gameStateRef, (snapshot) => {
       const data = snapshot.val();
-      if (data && data.status === 'playing') {
-        setIsLive(true);
-        setFeedback('START!');
-      } else {
-        setIsLive(false);
-        setFeedback('대기 중');
-        setScore(0);
-        setExpression(0);
+      if (data) {
+        if (data.beatType) {
+          setBeatType(data.beatType);
+          beatTypeRef.current = data.beatType;
+        }
+
+        if (data.status === 'playing') {
+          setIsLive(true);
+          setFeedback('START!');
+        } else {
+          setIsLive(false);
+          setFeedback('대기 중');
+          setScore(0);
+          setExpression(0);
+        }
       }
     });
 
@@ -92,19 +101,47 @@ export default function Student() {
     }
   };
 
-  // 무한대(∞) 모양의 4박자 지휘 궤적 수학 공식
-  const getInfinityLoopNode = (time: number) => {
-    const bpm = 120;
-    const duration = (60 / bpm) * 4 * 1000; 
-    const t = (time % duration) / duration;
-    const angle = t * 2 * Math.PI;
-
-    const scaleX = 220;
-    const scaleY = 120;
-    const x = 400 + scaleX * Math.sin(angle);
-    const y = 225 + scaleY * Math.sin(2 * angle) / 2;
-
-    return { x, y };
+  // 박자별 지휘 궤적 수학 공식
+  const getConductingNode = (time: number, beatType: string, bpm: number = 120) => {
+    const beatDuration = (60 / bpm) * 1000; // 1박자당 시간(ms)
+    
+    if (beatType === '2/4') {
+      const t = (time % (beatDuration * 2)) / (beatDuration * 2);
+      return { x: 400 + 150 * Math.sin(t * 2 * Math.PI), y: 300 + 150 * Math.cos(t * 2 * Math.PI) };
+    } else if (beatType === '3/4') {
+      const t = (time % (beatDuration * 3)) / (beatDuration * 3);
+      return { x: 400 + 200 * Math.sin(t * 2 * Math.PI), y: 350 + 100 * Math.cos(t * 3 * Math.PI) };
+    } else if (beatType === '6/8') {
+      const t = (time % (beatDuration * 6)) / (beatDuration * 6);
+      return { x: 400 + 260 * Math.sin(t * 2 * Math.PI), y: 320 + 100 * Math.sin(t * 4 * Math.PI) };
+    } else {
+      // [정통 4/4박자 지휘 궤적]: 1박(下) -> 2박(左) -> 3박(右) -> 4박(上)
+      const t = (time % (beatDuration * 4)) / (beatDuration * 4); // 0.0 ~ 1.0 순환
+      const angle = t * 2 * Math.PI;
+      
+      // 리사주가 아닌 정통 4방향 스트로크를 부드럽게 구현하기 위한 다항 곡선 제어
+      let x = 400;
+      let y = 300;
+      
+      if (t < 0.25) { // 1박: 아래로 내려치기
+        const p = t / 0.25;
+        x = 400 - 30 * Math.sin(p * Math.PI);
+        y = 180 + 240 * p;
+      } else if (t < 0.5) { // 2박: 왼쪽으로 찌르기
+        const p = (t - 0.25) / 0.25;
+        x = 400 - 180 * p;
+        y = 420 - 100 * Math.sin(p * Math.PI / 2);
+      } else if (t < 0.75) { // 3박: 오른쪽으로 길게 뻗기
+        const p = (t - 0.5) / 0.25;
+        x = 220 + 360 * p;
+        y = 320 + 50 * Math.sin(p * Math.PI);
+      } else { // 4박: 원점으로 솟구치며 회귀
+        const p = (t - 0.75) / 0.25;
+        x = 580 - 180 * p;
+        y = 320 - 140 * p;
+      }
+      return { x, y };
+    }
   };
 
   const analyzeLeftHand = (landmarks: any[]) => {
@@ -139,15 +176,20 @@ export default function Student() {
     ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
     ctx.restore();
 
-    // 4박자 점선 가이드라인 그리기 (상시 표시하여 대기 및 연습 유도)
+    // 박자 점선 가이드라인 그리기 (상시 표시하여 대기 및 연습 유도)
     ctx.strokeStyle = 'rgba(29, 39, 55, 0.3)'; // 어두운 차콜 투명 레이어
     ctx.lineWidth = 4;
     ctx.setLineDash([8, 8]);
     ctx.beginPath();
     for (let i = 0; i <= 100; i++) {
-      const duration = (60 / 120) * 4 * 1000;
+      let cycleFactor = 4;
+      if (beatTypeRef.current === '2/4') cycleFactor = 2;
+      else if (beatTypeRef.current === '3/4') cycleFactor = 3;
+      else if (beatTypeRef.current === '6/8') cycleFactor = 6;
+      
+      const duration = (60 / 120) * cycleFactor * 1000;
       const fakeTime = (i / 100) * duration;
-      const pt = getInfinityLoopNode(fakeTime);
+      const pt = getConductingNode(fakeTime, beatTypeRef.current);
       if (i === 0) ctx.moveTo(pt.x, pt.y);
       else ctx.lineTo(pt.x, pt.y);
     }
@@ -157,7 +199,7 @@ export default function Student() {
     // --- [조건부 평가 영역]: 교사가 합주 시작(isLive)을 했을 때만 활성화 ---
     let targetNode = { x: 400, y: 225 }; // 비작동시 중앙 고정
     if (isLive) {
-      targetNode = getInfinityLoopNode(timestamp);
+      targetNode = getConductingNode(timestamp, beatTypeRef.current);
       ctx.fillStyle = '#1F2937'; // 타이밍 구슬 등장
       ctx.beginPath();
       ctx.arc(targetNode.x, targetNode.y, 18, 0, 2 * Math.PI);
@@ -178,19 +220,12 @@ export default function Student() {
         const isRightZone = wristX > canvas.width / 2;
 
         if (isRightZone) {
-          // 오른손 마디마디 전체 점 찍기 (골드 컬러)
-          landmarks.forEach(lm => {
-            ctx.fillStyle = 'rgba(245, 158, 11, 0.8)';
-            ctx.beginPath();
-            ctx.arc((1 - lm.x) * canvas.width, lm.y * canvas.height, 5, 0, 2 * Math.PI);
-            ctx.fill();
-          });
+          // 오직 8번(검지 손가락 끝) 점만 추적 (미러링 적용)
+          const indexFingerTip = landmarks[8];
+          const pointerX = (1 - indexFingerTip.x) * canvas.width;
+          const pointerY = indexFingerTip.y * canvas.height;
 
-          // 오른손 마디마디 기준 포인터 (골드 컬러 램프)
-          const mcp = landmarks[9];
-          const pointerX = (1 - (landmarks[0].x + mcp.x) / 2) * canvas.width;
-          const pointerY = ((landmarks[0].y + mcp.y) / 2) * canvas.height;
-
+          // 예쁘고 선명한 황금빛 포인터 표시
           ctx.fillStyle = '#F59E0B';
           ctx.shadowBlur = 15;
           ctx.shadowColor = '#F59E0B';
@@ -240,7 +275,7 @@ export default function Student() {
     // 0.5초 주기로 Firebase RTDB 서버에 스로틀링 전송
     if (isLive && timestamp - lastFirebaseUpdate.current > 500) {
       lastFirebaseUpdate.current = timestamp;
-      set(ref(db, `scores/${partId}/${studentName}`), {
+      set(ref(db, `scores/${studentName}`), {
         beatScore: currentBeatScore,
         expressionScore: currentExpression,
         updatedAt: timestamp
@@ -256,10 +291,10 @@ export default function Student() {
       <div className="w-full flex justify-between items-center border-b border-[#D1D5DB] pb-4">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Student Maestro</h1>
-          <p className="text-sm text-gray-500">파트: {partId} | 이름: {studentName}</p>
+          <p className="text-sm text-gray-500">이름: {studentName}</p>
         </div>
         <div className="text-right">
-          <div className="text-xs text-gray-400">BPM 120 | 맨손 양손 지휘 가이드</div>
+          <div className="text-xs text-gray-400">BPM 120 | {beatType} | 맨손 양손 지휘 가이드</div>
           <div className={`text-lg font-bold ${isLive ? 'text-[#F59E0B] animate-pulse' : 'text-gray-400'}`}>
             {feedback}
           </div>
